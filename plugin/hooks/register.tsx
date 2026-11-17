@@ -61,14 +61,15 @@ async function readKey($: any): Promise<string> {
   } catch { return ""; }
 }
 
-// One compact readout of every account's usage, e.g. "personal 5h 42% wk 61% · work 5h 8% wk 20%".
-function usageSummary(h: Heartbeat | null): string {
+// Compact usage readout. The billed account's meters come first without its name (the label
+// already says it); every other account follows with its name, e.g. "5h 42% wk 61% · work 5h 8% wk 20%".
+function usageSummary(h: Heartbeat | null, current: string | null): string {
   if (!h?.usage) return "";
   const pct = (v: number | null) => (v === null ? "?" : `${Math.round(v * 100)}%`);
-  return (h.accounts ?? [])
-    .filter((n) => h.usage?.[n])
-    .map((n) => { const u = h.usage![n]; return `${n} 5h ${pct(u.h5)} wk ${pct(u.d7)}`; })
-    .join(" · ");
+  const meter = (n: string) => { const u = h.usage![n]; return `5h ${pct(u.h5)} wk ${pct(u.d7)}`; };
+  const seen = (h.accounts ?? []).filter((n) => h.usage?.[n]);
+  const own = current && seen.includes(current) ? [meter(current)] : [];
+  return [...own, ...seen.filter((n) => n !== current).map((n) => `${n} ${meter(n)}`)].join(" · ");
 }
 
 async function readMarker($: any): Promise<string | null> {
@@ -97,7 +98,7 @@ async function apply($: any, account: string | null, source: Billing["source"]):
   relayKey = await readKey($);
   if (!relayKey) hb = null;            // no key: the relay cannot be used, treat it as down
   const accounts = hb?.accounts ?? [];
-  const meters = usageSummary(hb);
+  const meters = usageSummary(hb, account);
   const set = (patch: Partial<Billing>) => update($, billing, (cur) => ({ ...cur, host, accounts, relayUp: !!hb, ...patch }));
 
   if (!account) {
@@ -122,7 +123,7 @@ async function apply($: any, account: string | null, source: Billing["source"]):
   await $.env.set("ANTHROPIC_BASE_URL", `${RELAY}/acct/${account}/${relayKey}`);
   await set({ account, source });
   const left = daysLeft(hb.expires?.[account]);
-  let s = `💳 billing: ${label}`;
+  let s = `💳 ${label}`;
   if (left !== null && left <= WARN_DAYS) {
     s += ` ⚠ token expires in ${left}d`;
     if (!warned) { warned = true; $.ui.toast(`account-switcher: the ${label} token expires in ${left} days — run the add-account script for ${account} again`); }
