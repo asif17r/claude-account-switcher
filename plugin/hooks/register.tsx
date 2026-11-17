@@ -7,6 +7,8 @@
 // app keeps its own login; only this session's model requests change accounts. Fails open:
 // relay down or no token → the session stays on the window's account and the status line says
 // so. The plugin never reads or logs a token; expiry dates come from the relay's heartbeat file.
+// Every routed request carries the relay's secret key (relay.key, beside the relay) in its path,
+// so other local programs cannot spend the accounts through the relay.
 
 import { atom, read, update } from "claude-code";
 import type { Billing } from "../types";
@@ -36,6 +38,7 @@ function usageLine(name: string, u?: Usage): string | null {
 }
 
 let store = "";
+let relayKey = "";
 let hb: Heartbeat | null = null;
 let warned = false;
 
@@ -48,6 +51,24 @@ async function readHeartbeat($: any): Promise<Heartbeat | null> {
     const h = JSON.parse(await $.fs.read(f)) as Heartbeat;
     return (Date.now() / 1000 - Number(h.at ?? 0)) < STALE_S ? h : null;
   } catch { return null; }
+}
+
+async function readKey($: any): Promise<string> {
+  try {
+    const f = `${store}/relay.key`;
+    if (!(await $.fs.exists(f))) return "";
+    return (await $.fs.read(f)).trim();
+  } catch { return ""; }
+}
+
+// One compact readout of every account's usage, e.g. "personal 5h 42% wk 61% · work 5h 8% wk 20%".
+function usageSummary(h: Heartbeat | null): string {
+  if (!h?.usage) return "";
+  const pct = (v: number | null) => (v === null ? "?" : `${Math.round(v * 100)}%`);
+  return (h.accounts ?? [])
+    .filter((n) => h.usage?.[n])
+    .map((n) => { const u = h.usage![n]; return `${n} 5h ${pct(u.h5)} wk ${pct(u.d7)}`; })
+    .join(" · ");
 }
 
 async function readMarker($: any): Promise<string | null> {
@@ -73,13 +94,16 @@ async function apply($: any, account: string | null, source: Billing["source"]):
   const b = await read($, billing);
   const host = b.host ?? { baseUrl: await $.env.get("ANTHROPIC_BASE_URL") };
   hb = await readHeartbeat($);
+  relayKey = await readKey($);
+  if (!relayKey) hb = null;            // no key: the relay cannot be used, treat it as down
   const accounts = hb?.accounts ?? [];
+  const meters = usageSummary(hb);
   const set = (patch: Partial<Billing>) => update($, billing, (cur) => ({ ...cur, host, accounts, relayUp: !!hb, ...patch }));
 
   if (!account) {
     await $.env.set("ANTHROPIC_BASE_URL", host.baseUrl);
     await set({ account: null, source: null });
-    $.ui.status(undefined);
+    $.ui.status(meters ? `💳 window account · ${meters}` : undefined);
     return "billing: window account";
   }
   const label = account.toUpperCase();
@@ -95,7 +119,7 @@ async function apply($: any, account: string | null, source: Billing["source"]):
     const s = `⚠ ${label}: no token · billing window account`;
     $.ui.status(s); return s;
   }
-  await $.env.set("ANTHROPIC_BASE_URL", `${RELAY}/acct/${account}`);
+  await $.env.set("ANTHROPIC_BASE_URL", `${RELAY}/acct/${account}/${relayKey}`);
   await set({ account, source });
   const left = daysLeft(hb.expires?.[account]);
   let s = `💳 billing: ${label}`;
@@ -103,6 +127,7 @@ async function apply($: any, account: string | null, source: Billing["source"]):
     s += ` ⚠ token expires in ${left}d`;
     if (!warned) { warned = true; $.ui.toast(`account-switcher: the ${label} token expires in ${left} days — run the add-account script for ${account} again`); }
   }
+  if (meters) s += ` · ${meters}`;
   $.ui.status(s);
   return s;
 }
@@ -132,7 +157,7 @@ export function register(on: any) {
     await $.command.register({
       name: "account",
       description: "Bill this session to another Claude account (via the account-switcher relay)",
-      argumentHint: "[name | off | status | show | hide]",
+      argumentHint: "[name | off | status | refresh | show | hide]",
     });
     return next(e);
   });
@@ -179,8 +204,25 @@ export function register(on: any) {
       for (const n of known) { const u = usageLine(n, hb?.usage?.[n]); if (u) lines.push(u); }
       if (hb && !Object.keys(hb.usage ?? {}).length) lines.push("  usage: none seen yet (appears after an account's first reply through the relay)");
       lines.push(`Band above the prompt: ${(await read($, isHidden)) ? "hidden (/account show)" : "shown (/account hide)"}`);
-      lines.push("Usage: /account <name> · /account off · marker file .claude/account in a project");
+      lines.push("Usage: /account <name> · /account off · /account refresh (fresh usage for every account) · marker file .claude/account in a project");
       return { text: lines.join("\n") };
+    }
+    if (arg === "refresh") {
+      relayKey = await readKey($);
+      if (!hb || !relayKey) return { text: "Relay is down or has no key; cannot refresh usage." };
+      try {
+        const r = await $.http.fetch(`${RELAY}/refresh/${relayKey}`, { method: "POST" });
+        if (!r.ok) return { text: `Refresh failed: HTTP ${r.status}` };
+        const out = JSON.parse(r.text) as { results: Record<string, string>; usage: Record<string, Usage> };
+        const lines = ["Usage refreshed (each account sent one tiny request):"];
+        for (const n of Object.keys(out.results)) {
+          lines.push(usageLine(n, out.usage?.[n]) ?? `  ${n}: ${out.results[n]}`);
+        }
+        await reapply($);
+        return { text: lines.join("\n") };
+      } catch (err) {
+        return { text: `Refresh failed: ${String(err)}` };
+      }
     }
     if (arg === "show" || arg === "hide") {
       await setHidden($, arg === "hide");

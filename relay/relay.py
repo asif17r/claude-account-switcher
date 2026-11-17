@@ -1,7 +1,7 @@
 """claude-account-switcher relay.
 
 A loopback relay for Claude Code sessions. The companion plugin points a session at
-http://127.0.0.1:48620/acct/<name>; this relay replaces the Authorization header with <name>'s
+http://127.0.0.1:48620/acct/<name>/<key>; this relay checks <key> against relay.key, then replaces the Authorization header with <name>'s
 long-lived token from tokens.json (beside this file) and forwards the request to api.anthropic.com,
 streaming the response back. It binds 127.0.0.1 only and never logs a token.
 
@@ -10,11 +10,19 @@ Files beside this script:
                 (a bare string value is accepted too)
   relay.alive   heartbeat rewritten every 10 s: port, pid, time, account names
   relay.log     one line per request: account, method, path, status, bytes, seconds
+  relay.key     random secret, created on first start (mode 600). Every routed request and
+                /refresh must carry it in the path, so other local programs cannot spend the
+                accounts through the relay. The key is never logged.
 Health: GET /health -> {"ok": true, "accounts": [names]}
+Refresh: POST /refresh/<key> -> sends each account one tiny model request (1 output token) so its
+                usage windows are fresh in relay.alive. It spends a little usage and starts that
+                account's 5-hour window if none is running.
 """
+import hmac
 import http.client
 import json
 import os
+import secrets
 import sys
 import threading
 import time
@@ -24,9 +32,37 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TOKENS = os.path.join(HERE, "tokens.json")
 LOG = os.path.join(HERE, "relay.log")
 ALIVE = os.path.join(HERE, "relay.alive")
+KEYFILE = os.path.join(HERE, "relay.key")
 PORT = 48620
 UPSTREAM = "api.anthropic.com"
 HOP = {"host", "authorization", "x-api-key", "connection", "keep-alive", "transfer-encoding", "content-length", "proxy-authorization", "te", "trailer", "upgrade"}
+
+
+def load_key() -> str:
+    """Return the relay secret, creating it (mode 600) on first start."""
+    try:
+        with open(KEYFILE, encoding="utf-8") as f:
+            k = f.read().strip()
+        if k:
+            return k
+    except OSError:
+        pass
+    k = secrets.token_urlsafe(32)
+    fd = os.open(KEYFILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(k + "\n")
+    return k
+
+
+KEY = ""
+# Request headers of the last routed model request, minus credentials, reused by /refresh so the
+# probe looks like a Claude Code request (anthropic-version, anthropic-beta, user-agent, ...).
+LAST_HEADERS: dict = {}
+PROBE_MODEL = "claude-haiku-5-5"
+
+
+def key_ok(k: str) -> bool:
+    return bool(KEY) and hmac.compare_digest(k.encode(), KEY.encode())
 
 
 def log(msg: str) -> None:
@@ -99,11 +135,21 @@ class Relay(BaseHTTPRequestHandler):
         if self.path == "/health":
             self._json(200, {"ok": True, "accounts": sorted(load_tokens().keys())})
             return
-        parts = self.path.split("/", 3)  # ['', 'acct', '<name>', '<rest>']
-        if len(parts) < 4 or parts[1] != "acct":
-            self._json(404, {"error": "expected /acct/<name>/..."})
+        if self.path.startswith("/refresh/"):
+            if not key_ok(self.path[len("/refresh/"):]):
+                self._json(403, {"error": "bad key"})
+                return
+            self._json(200, {"ok": True, "results": refresh_all(), "usage": dict(USAGE)})
             return
-        name, rest = parts[2], "/" + parts[3]
+        parts = self.path.split("/", 4)  # ['', 'acct', '<name>', '<key>', '<rest>']
+        if len(parts) < 5 or parts[1] != "acct":
+            self._json(404, {"error": "expected /acct/<name>/<key>/..."})
+            return
+        if not key_ok(parts[3]):
+            log(f"rejected request for '{parts[2]}': bad key")
+            self._json(403, {"type": "error", "error": {"type": "permission_error", "message": "account-switcher relay: bad key"}})
+            return
+        name, rest = parts[2], "/" + parts[4]
         token = load_tokens().get(name)
         if not token:
             log(f"no token for account '{name}'")
@@ -112,6 +158,15 @@ class Relay(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else None
         headers = {k: v for k, v in self.headers.items() if k.lower() not in HOP}
+        if self.command == "POST" and rest.startswith("/v1/messages") and "count_tokens" not in rest:
+            LAST_HEADERS.clear()
+            LAST_HEADERS.update(headers)
+            try:
+                m = json.loads(body or b"{}").get("model", "")
+                if "haiku" in m:
+                    globals()["PROBE_MODEL"] = m
+            except ValueError:
+                pass
         headers["Authorization"] = f"Bearer {token}"
         if body is not None:
             headers["Content-Length"] = str(len(body))
@@ -152,6 +207,40 @@ class Relay(BaseHTTPRequestHandler):
     do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = _handle
 
 
+def refresh_one(name: str, token: str) -> str:
+    """Send one tiny model request as <name> so its usage headers are recorded. Returns a status."""
+    body = json.dumps({
+        "model": PROBE_MODEL,
+        "max_tokens": 1,
+        "system": "You are Claude Code, Anthropic's official CLI for Claude.",
+        "messages": [{"role": "user", "content": "ok"}],
+    }).encode()
+    headers = dict(LAST_HEADERS) or {"anthropic-version": "2023-06-01", "anthropic-beta": "oauth-2025-04-20"}
+    headers.setdefault("anthropic-version", "2023-06-01")
+    headers["Content-Type"] = "application/json"
+    headers["Accept"] = "application/json"
+    headers.pop("accept-encoding", None)
+    headers.pop("Accept-Encoding", None)
+    headers["Authorization"] = f"Bearer {token}"
+    headers["Content-Length"] = str(len(body))
+    try:
+        up = http.client.HTTPSConnection(UPSTREAM, timeout=60)
+        up.request("POST", "/v1/messages?beta=true", body=body, headers=headers)
+        resp = up.getresponse()
+        resp.read()
+        note_usage(name, resp)
+        up.close()
+        log(f"{name} refresh -> {resp.status}")
+        return "ok" if resp.status < 400 or name in USAGE else f"http {resp.status}"
+    except Exception as e:
+        log(f"{name} refresh error {type(e).__name__}")
+        return f"error {type(e).__name__}"
+
+
+def refresh_all() -> dict:
+    return {n: refresh_one(n, t) for n, t in load_tokens().items()}
+
+
 def heartbeat(port: int) -> None:
     """Rewrite relay.alive every 10 s so the plugin can see the relay is up without an HTTP call."""
 
@@ -169,6 +258,7 @@ def heartbeat(port: int) -> None:
 
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
+    KEY = load_key()
     log(f"relay starting on 127.0.0.1:{port}")
     heartbeat(port)
     try:
