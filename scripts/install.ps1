@@ -11,7 +11,22 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-if (-not (Test-Path $Python)) { $Python = (Get-Command pythonw -ErrorAction SilentlyContinue).Source }
+if (-not (Test-Path $Python)) {
+  # PATH often lists launcher shims first (WindowsApps aliases, the Python install manager's bin\),
+  # which may misbehave under a scheduled task. Ask Python for its real executable and use the
+  # pythonw.exe beside it; fall back to whatever pythonw is on the PATH.
+  $Python = $null
+  foreach ($c in 'python3', 'python', 'py') {
+    $cmd = Get-Command $c -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $cmd) { continue }
+    $real = & $cmd.Source -c "import sys; print(sys.executable)" 2>$null
+    if ($LASTEXITCODE -eq 0 -and $real) {
+      $w = Join-Path (Split-Path -Parent "$real".Trim()) 'pythonw.exe'
+      if (Test-Path $w) { $Python = $w; break }
+    }
+  }
+  if (-not $Python) { $Python = (Get-Command pythonw -ErrorAction SilentlyContinue).Source }
+}
 if (-not $Python) { throw "pythonw.exe not found; install Python 3 and re-run" }
 
 # 1. files
@@ -32,7 +47,8 @@ $dirs = @()
 if ($existing) { $dirs = $existing -split ';' | Where-Object { $_ -and ($_ -notmatch 'account-switcher') } }
 $dirs += $pluginDir
 $json.env | Add-Member -NotePropertyName CLAUDE_CODE_PLUGIN_DIRS -NotePropertyValue ($dirs -join ';') -Force
-($json | ConvertTo-Json -Depth 20) | Set-Content -Path $Settings -Encoding utf8
+# UTF-8 without a BOM: Windows PowerShell 5.1's Set-Content -Encoding utf8 adds one.
+[IO.File]::WriteAllText($Settings, ($json | ConvertTo-Json -Depth 20), (New-Object Text.UTF8Encoding($false)))
 $check = (Get-Content $Settings -Raw | ConvertFrom-Json).env.CLAUDE_CODE_PLUGIN_DIRS
 if ($check -notmatch [regex]::Escape($pluginDir)) { throw "settings.json did not take CLAUDE_CODE_PLUGIN_DIRS" }
 Write-Host "settings.json env.CLAUDE_CODE_PLUGIN_DIRS = $check"

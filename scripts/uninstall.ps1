@@ -12,7 +12,7 @@ if (Test-Path $Settings) {
   if ($json.env -and $json.env.CLAUDE_CODE_PLUGIN_DIRS) {
     $dirs = $json.env.CLAUDE_CODE_PLUGIN_DIRS -split ';' | Where-Object { $_ -and ($_ -notmatch 'account-switcher') }
     if ($dirs) { $json.env.CLAUDE_CODE_PLUGIN_DIRS = ($dirs -join ';') } else { $json.env.PSObject.Properties.Remove('CLAUDE_CODE_PLUGIN_DIRS') }
-    ($json | ConvertTo-Json -Depth 20) | Set-Content -Path $Settings -Encoding utf8
+    [IO.File]::WriteAllText($Settings, ($json | ConvertTo-Json -Depth 20), (New-Object Text.UTF8Encoding($false)))
   }
 }
 Remove-Item "$Store\plugin" -Recurse -Force -ErrorAction SilentlyContinue
