@@ -1,18 +1,25 @@
-// The band above the prompt: one button per account the relay has a token for, a press moves the
-// session's API traffic to that account, "off" moves it back, and "hide" is remembered in the store.
+// The band above the prompt: one button per account the relay has a token for. A press records the
+// choice for the whole machine (the `current` file beside the relay) and moves this session's API
+// traffic to that account; every other session follows it. "off" moves all of them back, and
+// "hide" is remembered in the store.
 import { test, expect, mock } from "claude-code/testing";
 
 const RELAY = "http://127.0.0.1:48620";
+const KEY = "test-key";
 const BAND = { plugin: "account-switcher", component: "AbovePrompt" as const, props: { hasSurvey: false, isWorking: false, maxRows: 10 } };
 
-// The world beneath the plugin: a relay heartbeat file (or none), a project with no marker,
-// and an environment the plugin may write (the kit's mock.env is read-only).
-function world(on: any, heartbeat: object | null, env: Record<string, string | undefined>) {
-  on("fs.exists", async (_$: any, e: any) => ({ value: /relay\.alive$/.test(e.path) ? heartbeat !== null : false }));
-  on("fs.read", async (_$: any, e: any) => {
-    if (/relay\.alive$/.test(e.path) && heartbeat) return { value: JSON.stringify(heartbeat) };
-    return { deny: `unexpected read ${e.path}` };
-  });
+// The world beneath the plugin: a clock, an in-memory file system holding the relay's heartbeat
+// and key (matched by file name, whatever the plugin's root), and an environment the plugin may
+// write (the kit's mock.env is read-only).
+function world(on: any, up: boolean, env: Record<string, string | undefined>, files: Record<string, string> = {}) {
+  const clock = mock.clock(on);
+  const name = (p: string) => p.slice(Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\")) + 1);
+  const fs: Record<string, string> = { "relay.key": KEY, ...files };
+  // A fresh heartbeat: the plugin judges its age by the real time, not the mocked clock.
+  if (up) fs["relay.alive"] = JSON.stringify({ port: 48620, pid: 1, at: Date.now() / 1000, accounts: ["vbp", "personal2", "personal"] });
+  on("fs.exists", async (_$: any, e: any) => ({ value: name(e.path) in fs }));
+  on("fs.read", async (_$: any, e: any) => (name(e.path) in fs ? { value: fs[name(e.path)] } : { deny: `unexpected read ${e.path}` }));
+  on("fs.write", async (_$: any, e: any) => { fs[name(e.path)] = e.text; return { value: undefined }; });
   on("session.cwd", async () => ({ value: "C:/work/project" }));
   on("session.root", async () => ({ value: "C:/work/project" }));
   on("session.start", async (_$: any, e: any) => ({ cwd: e.cwd }));
@@ -23,15 +30,13 @@ function world(on: any, heartbeat: object | null, env: Record<string, string | u
   on("command.register", async (_$: any, e: any) => ({ value: { command: e.name } }));
   // The engine's own band is empty: what a hidden band's next(e) reaches.
   on("ui.render", { component: "AbovePrompt" }, async () => ({ type: "Box", props: {}, children: [] }));
-  return env;
+  return { env, fs, clock };
 }
 
-const alive = () => ({ port: 48620, pid: 1, at: Date.now() / 1000, accounts: ["vbp", "personal2", "personal"] });
-
 for (const surface of ["terminal", "desktop"] as const) {
-  test(`a button press switches the account and off restores the host URL (${surface})`, async ($, on) => {
+  test(`a button press switches the machine-wide account and off restores the host URL (${surface})`, async ($, on) => {
     mock.store(on);
-    const env = world(on, alive(), { ANTHROPIC_BASE_URL: "https://host.example" });
+    const { env, fs } = world(on, true, { ANTHROPIC_BASE_URL: "https://host.example" });
     await $.session.start({ cwd: "C:/work/project", surface, isInteractive: true });
 
     const ui = await $.ui.mount({ ...BAND, surface });
@@ -41,12 +46,14 @@ for (const surface of ["terminal", "desktop"] as const) {
     expect(await ui.find({ type: "Text", text: /window account/ })).toBeDefined();
 
     await ui.press({ key: "acct:personal2" });
-    expect(env.ANTHROPIC_BASE_URL).toBe(`${RELAY}/acct/personal2`);
+    expect(env.ANTHROPIC_BASE_URL).toBe(`${RELAY}/acct/personal2/${KEY}`);
+    expect(fs.current.trim()).toBe("personal2");
     expect(await ui.find({ type: "Text", text: /PERSONAL2/ })).toBeDefined();
     expect(await ui.find({ key: "acct:off" })).toBeDefined();
 
     await ui.press({ key: "acct:off" });
     expect(env.ANTHROPIC_BASE_URL).toBe("https://host.example");
+    expect(fs.current).toBe("");
     expect(await ui.find({ key: "acct:off" })).toBeUndefined();
 
     await ui.press({ key: "hide" });
@@ -55,9 +62,38 @@ for (const surface of ["terminal", "desktop"] as const) {
   });
 }
 
+test("a new session starts on the machine-wide account another session chose", async ($, on) => {
+  mock.store(on);
+  const { env } = world(on, true, { ANTHROPIC_BASE_URL: "https://host.example" }, { current: "personal\n" });
+  await $.session.start({ cwd: "C:/elsewhere", surface: "desktop", isInteractive: true });
+  expect(env.ANTHROPIC_BASE_URL).toBe(`${RELAY}/acct/personal/${KEY}`);
+  const { text } = await $.command.run({ command: "account", args: "" });
+  expect(text).toMatch(/All sessions bill: PERSONAL/);
+});
+
+test("an idle open session follows a switch made elsewhere within a few seconds", async ($, on) => {
+  mock.store(on);
+  const { env, fs, clock } = world(on, true, { ANTHROPIC_BASE_URL: "https://host.example" });
+  await $.session.start({ cwd: "C:/work/project", surface: "terminal", isInteractive: true });
+  expect(env.ANTHROPIC_BASE_URL).toBe("https://host.example");
+  fs.current = "vbp\n"; // another session pressed vbp
+  await clock.advance(6000);
+  expect(env.ANTHROPIC_BASE_URL).toBe(`${RELAY}/acct/vbp/${KEY}`);
+});
+
+test("/account <name> records the choice for every session", async ($, on) => {
+  mock.store(on);
+  const { env, fs } = world(on, true, { ANTHROPIC_BASE_URL: "https://host.example" });
+  await $.session.start({ cwd: "C:/work/project", surface: "terminal", isInteractive: true });
+  const { text } = await $.command.run({ command: "account", args: "personal" });
+  expect(text).toMatch(/Every session/);
+  expect(fs.current.trim()).toBe("personal");
+  expect(env.ANTHROPIC_BASE_URL).toBe(`${RELAY}/acct/personal/${KEY}`);
+});
+
 test("relay down: no account buttons, the band says so, and the session keeps the host URL", async ($, on) => {
   mock.store(on);
-  const env = world(on, null, { ANTHROPIC_BASE_URL: "https://host.example" });
+  const { env } = world(on, false, { ANTHROPIC_BASE_URL: "https://host.example" }, { current: "personal\n" });
   await $.session.start({ cwd: "C:/work/project", surface: "terminal", isInteractive: true });
   const ui = await $.ui.mount({ ...BAND, surface: "terminal" });
   expect(await ui.find({ key: "acct:vbp" })).toBeUndefined();
@@ -68,7 +104,7 @@ test("relay down: no account buttons, the band says so, and the session keeps th
 
 test("a hide remembered in the store keeps the band away; /account show brings it back", async ($, on) => {
   mock.store(on, { "band.hidden": true });
-  world(on, alive(), {});
+  world(on, true, {});
   await $.session.start({ cwd: "C:/work/project", surface: "terminal", isInteractive: true });
   const ui = await $.ui.mount({ ...BAND, surface: "terminal" });
   expect(await ui.find({ key: "acct:vbp" })).toBeUndefined();

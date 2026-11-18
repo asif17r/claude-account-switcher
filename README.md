@@ -4,6 +4,7 @@
 > - **Relay lock:** the relay makes a random secret (`relay.key`, mode 600) on first start and refuses any routed request or refresh without it, so other programs on the machine cannot spend your accounts.
 > - **`/account refresh`:** sends each account one 1-token request so every account's 5-hour and weekly usage is fresh.
 > - **Compact status line:** `💳 PERSONAL · 5h 42% wk 61% · work 5h 8% wk 20%` (billed account first, then the others).
+> - **One account for the whole machine:** a switch in any session (band button or `/account <name>`) is saved in `~/.claude/account-switcher/current` and every session, open or new, follows it: at its next message, and within about 5 seconds on its band and status line. Project marker files are no longer read.
 > - **`scripts/check-accounts.sh`:** prints the organization id and usage behind each stored token, to catch a token approved under the wrong account.
 > - **macOS tested** (Claude Desktop 5.11492.5, Claude Code 2.1.325, macOS 26, Apple silicon).
 >
@@ -11,9 +12,9 @@
 
 Bill a Claude Code session to a different Claude subscription, per project or on demand, inside **one** Claude Desktop app or one terminal. No logout, no restart, no second copy of the app.
 
-- A project folder with `.claude/account` containing `work` bills every session opened there to the account named `work`.
-- A band above the prompt shows the account in force with one button per account that has a token: one click switches the current session from its next message; `off` returns it to the app's own login; `hide` puts the band away (remembered; `/account show` brings it back).
-- `/account <name>` does the same by keyboard; `/account off` returns to the app's own login; `/account` shows status, token expiry and each account's real usage meters.
+- One choice for the whole machine: switching in any session moves every session (open or new) to that account from its next message.
+- A band above the prompt shows the account in force with one button per account that has a token: one click switches every session; `off` returns them all to the app's own login; `hide` puts the band away (remembered; `/account show` brings it back).
+- `/account <name>` does the same by keyboard; `/account off` returns every session to the app's own login; `/account` shows status, token expiry and each account's real usage meters.
 - The status line reads `💳 billing: WORK` whenever a session is routed. If the relay is down or has no token for the name, the session stays on the app's login and the status line says so.
 
 | Platform | Installer | Service | Status |
@@ -108,8 +109,7 @@ Open a new Claude Code session afterwards; existing sessions do not load the plu
 
 ## Use
 
-- Put `.claude/account` with the account name in any project that should bill another account.
-- In a session: click an account in the band above the prompt, or `/account`, `/account work`, `/account off`, `/account refresh`, `/account hide`, `/account show`.
+- In any session (the choice applies to all of them): click an account in the band above the prompt, or `/account`, `/account work`, `/account off`, `/account refresh`, `/account hide`, `/account show`.
 - Renew a token near expiry (the status line warns at 14 days): run add-account for that name again.
 - Remove: `scripts\uninstall.ps1` / `scripts/uninstall.sh` (`-PurgeTokens` / `--purge-tokens` to delete the token store too).
 

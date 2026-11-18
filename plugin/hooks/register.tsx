@@ -2,9 +2,11 @@
 //
 // How it works: the relay (relay.py, loopback only) rewrites the Authorization header for the
 // account named in the request path. This plugin points the session's API traffic at
-// http://127.0.0.1:48620/acct/<name>, chosen by the project's `.claude/account` marker, by
-// `/account <name>` in the session, or by a button in the band above the prompt. The desktop
-// app keeps its own login; only this session's model requests change accounts. Fails open:
+// http://127.0.0.1:48620/acct/<name>. The account is one choice for the whole machine, kept in
+// the file `current` beside the relay: `/account <name>` or a button in the band above the prompt
+// writes it, and every session (open or new) reads it before each message and every few seconds,
+// so a switch in one session moves all of them. The desktop app keeps its own login; only the
+// sessions' model requests change accounts. Fails open:
 // relay down or no token → the session stays on the window's account and the status line says
 // so. The plugin never reads or logs a token; expiry dates come from the relay's heartbeat file.
 // Every routed request carries the relay's secret key (relay.key, beside the relay) in its path,
@@ -17,6 +19,7 @@ const RELAY = "http://127.0.0.1:48620";
 const STALE_S = 30;
 const WARN_DAYS = 14;
 const HIDDEN_KEY = "band.hidden"; // $.store: the hide choice outlives the session
+const POLL_MS = 5000;             // how often an open session looks for a switch made elsewhere
 
 type Usage = { at: number; h5: number | null; h5_reset: number | null; d7: number | null; d7_reset: number | null };
 type Heartbeat = { port: number; pid: number; at: number; accounts: string[]; expires?: Record<string, string>; usage?: Record<string, Usage> };
@@ -72,15 +75,18 @@ function usageSummary(h: Heartbeat | null, current: string | null): string {
   return [...own, ...seen.filter((n) => n !== current).map((n) => `${n} ${meter(n)}`)].join(" · ");
 }
 
-async function readMarker($: any): Promise<string | null> {
-  for (const base of [await $.session.cwd(), await $.session.root()]) {
-    const f = `${base}/.claude/account`;
-    if (await $.fs.exists(f)) {
-      const v = (await $.fs.read(f)).trim().toLowerCase();
-      if (v) return v;
-    }
-  }
-  return null;
+// The machine-wide choice: the account name in `current` beside the relay, or null (missing or
+// empty file) for the window's own account.
+async function readCurrent($: any): Promise<string | null> {
+  try {
+    const f = `${store}/current`;
+    if (!(await $.fs.exists(f))) return null;
+    return (await $.fs.read(f)).trim().toLowerCase() || null;
+  } catch { return null; }
+}
+
+async function writeCurrent($: any, account: string | null): Promise<void> {
+  await $.fs.write(`${store}/current`, account ? `${account}\n` : "");
 }
 
 function daysLeft(iso?: string): number | null {
@@ -104,7 +110,7 @@ async function apply($: any, account: string | null, source: Billing["source"]):
   if (!account) {
     await $.env.set("ANTHROPIC_BASE_URL", host.baseUrl);
     await set({ account: null, source: null });
-    $.ui.status(meters ? `💳 window account · ${meters}` : undefined);
+    $.ui.status(meters ? `💳 window account · ${meters}` : "💳 window account");
     return "billing: window account";
   }
   const label = account.toUpperCase();
@@ -133,9 +139,16 @@ async function apply($: any, account: string | null, source: Billing["source"]):
   return s;
 }
 
+// Follow the machine-wide choice (written by this or any other session).
 async function reapply($: any): Promise<string> {
-  const b = await read($, billing);
-  return apply($, b.account, b.source);
+  const current = await readCurrent($);
+  return apply($, current, current ? "machine" : null);
+}
+
+// Switch every session: record the choice, then apply it here at once.
+async function choose($: any, account: string | null): Promise<string> {
+  await writeCurrent($, account);
+  return apply($, account, account ? "machine" : null);
 }
 
 async function setHidden($: any, hidden: boolean): Promise<void> {
@@ -148,13 +161,16 @@ export function register(on: any) {
     store = dir($.plugin.root);
     const hidden = (await $.store.get(HIDDEN_KEY)) === true;
     await update($, isHidden, () => hidden);
-    const b = await read($, billing);
-    if (b.account || b.host) {
-      await apply($, b.account, b.source);            // a reload: keep what this session chose
-    } else {
-      const m = await readMarker($);
-      await apply($, m, m ? "marker" : null);
-    }
+    await reapply($);
+    // Pick up a switch made in another session while this one sits idle, so its band and
+    // status line stay in step. Only a change is applied.
+    // Best effort: without a clock the session still follows at its next message.
+    try {
+      $.clock.every(POLL_MS, async () => {
+        const b = await read($, billing);
+        if ((await readCurrent($)) !== b.account) await reapply($);
+      });
+    } catch { /* no clock here */ }
     await $.command.register({
       name: "account",
       description: "Bill this session to another Claude account (via the account-switcher relay)",
@@ -173,19 +189,19 @@ export function register(on: any) {
     const b = await read($, billing);
     const { Box, Button, Text } = $.ui.resolve(e);
     const current = b.account ? b.account.toUpperCase() : "window account";
-    const choose = (name: string | null) => async () => {
-      const s = await apply($, name, name ? "button" : null);
-      $.ui.toast(`account-switcher: ${s} — from the next message on`);
+    const pick = (name: string | null) => async () => {
+      const s = await choose($, name);
+      $.ui.toast(`account-switcher: ${s}. Every session uses it from its next message.`);
     };
     return (
       <Box flexDirection="row" gap={1}>
         <Text>💳 {current}</Text>
         {b.relayUp
           ? b.accounts.map((name) => (
-              <Button key={`acct:${name}`} label={name} variant={name === b.account ? "primary" : "secondary"} onPress={choose(name)} />
+              <Button key={`acct:${name}`} label={name} variant={name === b.account ? "primary" : "secondary"} onPress={pick(name)} />
             ))
           : <Text dimColor>relay down</Text>}
-        {b.account && <Button key="acct:off" label="off" dimColor onPress={choose(null)} />}
+        {b.account && <Button key="acct:off" label="off" dimColor onPress={pick(null)} />}
         <Button key="hide" label="hide" dimColor onPress={() => setHidden($, true)} />
       </Box>
     );
@@ -198,14 +214,14 @@ export function register(on: any) {
     const b = await read($, billing);
     if (!arg || arg === "status") {
       const lines = [
-        b.account ? `This session bills: ${b.account.toUpperCase()} (${b.source})` : "This session bills: the window's own account",
+        b.account ? `All sessions bill: ${b.account.toUpperCase()}` : "All sessions bill: the window's own account",
         hb ? `Relay: up (pid ${hb.pid}, port ${hb.port}); accounts with tokens: ${known.join(", ") || "none"}` : "Relay: DOWN — sessions fall back to the window's account",
       ];
       for (const n of known) { const d = daysLeft(hb?.expires?.[n]); if (d !== null) lines.push(`  ${n}: token expires in ${d} days`); }
       for (const n of known) { const u = usageLine(n, hb?.usage?.[n]); if (u) lines.push(u); }
       if (hb && !Object.keys(hb.usage ?? {}).length) lines.push("  usage: none seen yet (appears after an account's first reply through the relay)");
       lines.push(`Band above the prompt: ${(await read($, isHidden)) ? "hidden (/account show)" : "shown (/account hide)"}`);
-      lines.push("Usage: /account <name> · /account off · /account refresh (fresh usage for every account) · marker file .claude/account in a project");
+      lines.push("Usage: /account <name> · /account off · /account refresh (fresh usage for every account). A switch applies to every session on this machine.");
       return { text: lines.join("\n") };
     }
     if (arg === "refresh") {
@@ -230,11 +246,11 @@ export function register(on: any) {
       return { text: arg === "hide" ? "Band hidden in every session; /account show brings it back." : "Band shown above the prompt." };
     }
     if (arg === "off") {
-      return { text: await apply($, null, null) };
+      return { text: `${await choose($, null)}. Every session uses it from its next message.` };
     }
     if (!known.includes(arg)) {
       return { text: hb ? `No token for '${arg}'. Known: ${known.join(", ") || "none"}. Add one with scripts/add-account.ps1 -Name ${arg} (Windows) or scripts/add-account.sh ${arg} (macOS/Linux)` : "Relay is down; start it (Windows: scheduled task ClaudeAccountRelay · Linux: systemctl --user start claude-account-relay · macOS: launchctl kickstart gui/$(id -u)/com.claude-account-switcher.relay) and try again." };
     }
-    return { text: `${await apply($, arg, "command")} — from the next message on` };
+    return { text: `${await choose($, arg)}. Every session uses it from its next message.` };
   });
 }
