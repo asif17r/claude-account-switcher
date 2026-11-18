@@ -23,6 +23,7 @@ function world(on: any, up: boolean, env: Record<string, string | undefined>, fi
   on("session.cwd", async () => ({ value: "C:/work/project" }));
   on("session.root", async () => ({ value: "C:/work/project" }));
   on("session.start", async (_$: any, e: any) => ({ cwd: e.cwd }));
+  on("prompt.submit", async (_$: any, e: any) => ({ text: e.text }));
   on("env.get", async (_$: any, e: any) => ({ value: env[e.name] }));
   on("env.set", async (_$: any, e: any) => { env[e.name] = e.value; return { value: undefined }; });
   on("ui.status", async () => ({ value: undefined }));
@@ -39,6 +40,7 @@ for (const surface of ["terminal", "desktop"] as const) {
     mock.store(on);
     const { env, fs } = world(on, true, { ANTHROPIC_BASE_URL: "https://host.example" });
     await $.session.start({ cwd: "C:/work/project", surface, isInteractive: true });
+    await $.prompt.submit({ text: "hi" }); // routing starts with the first message
 
     const ui = await $.ui.mount({ ...BAND, surface });
     expect(await ui.find({ key: "acct:vbp" })).toBeDefined();
@@ -67,6 +69,9 @@ test("a new session starts on the machine-wide account another session chose", a
   mock.store(on);
   const { env } = world(on, true, { ANTHROPIC_BASE_URL: "https://host.example" }, { current: "personal\n" });
   await $.session.start({ cwd: "C:/elsewhere", surface: "desktop", isInteractive: true });
+  // Startup stays on the host's login so Remote Control can connect; the first message routes.
+  expect(env.ANTHROPIC_BASE_URL).toBe("https://host.example");
+  await $.prompt.submit({ text: "hi" });
   expect(env.ANTHROPIC_BASE_URL).toBe(`${RELAY}/acct/personal/${KEY}`);
   const { text } = await $.command.run({ command: "account", args: "" });
   expect(text).toMatch(/All sessions bill: PERSONAL/);
@@ -76,7 +81,8 @@ test("an idle open session follows a switch made elsewhere within a few seconds"
   mock.store(on);
   const { env, fs, clock } = world(on, true, { ANTHROPIC_BASE_URL: "https://host.example" });
   await $.session.start({ cwd: "C:/work/project", surface: "terminal", isInteractive: true });
-  expect(env.ANTHROPIC_BASE_URL).toBe("https://host.example");
+  await $.prompt.submit({ text: "hi" }); // routing starts with the first message
+  expect(env.ANTHROPIC_BASE_URL).toBe("https://host.example"); // nothing chosen yet
   fs.current = "vbp\n"; // another session pressed vbp
   await clock.advance(6000);
   expect(env.ANTHROPIC_BASE_URL).toBe(`${RELAY}/acct/vbp/${KEY}`);
@@ -86,6 +92,7 @@ test("/account <name> records the choice for every session", async ($, on) => {
   mock.store(on);
   const { env, fs } = world(on, true, { ANTHROPIC_BASE_URL: "https://host.example" });
   await $.session.start({ cwd: "C:/work/project", surface: "terminal", isInteractive: true });
+  await $.prompt.submit({ text: "hi" }); // routing starts with the first message
   const { text } = await $.command.run({ command: "account", args: "personal" });
   expect(text).toMatch(/Every session/);
   expect(fs.current.trim()).toBe("personal");
@@ -96,6 +103,7 @@ test("relay down: no account buttons, the band says so, and the session keeps th
   mock.store(on);
   const { env } = world(on, false, { ANTHROPIC_BASE_URL: "https://host.example" }, { current: "personal\n" });
   await $.session.start({ cwd: "C:/work/project", surface: "terminal", isInteractive: true });
+  await $.prompt.submit({ text: "hi" }); // routing starts with the first message
   const ui = await $.ui.mount({ ...BAND, surface: "terminal" });
   expect(await ui.find({ key: "acct:vbp" })).toBeUndefined();
   expect(await ui.find({ type: "Text", text: /relay down/ })).toBeDefined();
@@ -107,6 +115,7 @@ test("a hide remembered in the store keeps the band away; /account show brings i
   mock.store(on, { "band.hidden": true });
   world(on, true, {});
   await $.session.start({ cwd: "C:/work/project", surface: "terminal", isInteractive: true });
+  await $.prompt.submit({ text: "hi" }); // routing starts with the first message
   const ui = await $.ui.mount({ ...BAND, surface: "terminal" });
   expect(await ui.find({ key: "acct:vbp" })).toBeUndefined();
   const { text } = await $.command.run({ command: "account", args: "show" });
@@ -124,6 +133,7 @@ test("the usage button refreshes every account and shows their usage in a toast"
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ results: { personal: "ok", vbp: "ok" }, usage: { personal: w, vbp: { ...w, h5: 0.46, d7: 0.9 } } }) } };
   });
   await $.session.start({ cwd: "C:/work/project", surface: "desktop", isInteractive: true });
+  await $.prompt.submit({ text: "hi" }); // routing starts with the first message
   const ui = await $.ui.mount({ ...BAND, surface: "desktop" });
   await ui.press({ key: "usage" });
   const last = toasts[toasts.length - 1];

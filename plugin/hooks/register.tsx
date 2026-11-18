@@ -44,6 +44,10 @@ let store = "";
 let relayKey = "";
 let hb: Heartbeat | null = null;
 let warned = false;
+// A session starts on the app's own login and is routed from its first message on. Remote
+// Control refuses a session whose ANTHROPIC_BASE_URL is not api.anthropic.com, so this lets it
+// connect at startup on the host's login; the relay takes over the model calls afterwards.
+let routing = false;
 
 function dir(p: string): string { return p.replace(/[\\/][^\\/]+[\\/]?$/, ""); }
 
@@ -126,7 +130,7 @@ async function apply($: any, account: string | null, source: Billing["source"]):
     const s = `⚠ ${label}: no token · billing window account`;
     $.ui.status(s); return s;
   }
-  await $.env.set("ANTHROPIC_BASE_URL", `${RELAY}/acct/${account}/${relayKey}`);
+  await $.env.set("ANTHROPIC_BASE_URL", routing ? `${RELAY}/acct/${account}/${relayKey}` : host.baseUrl);
   await set({ account, source });
   const left = daysLeft(hb.expires?.[account]);
   let s = `💳 ${label}`;
@@ -197,8 +201,8 @@ export function register(on: any) {
     return next(e);
   });
 
-  on("turn.start", async ($: any, e: any, next: any) => { await reapply($); return next(e); });
-  on("prompt.submit", async ($: any, e: any, next: any) => { await reapply($); return next(e); });
+  on("turn.start", async ($: any, e: any, next: any) => { routing = true; await reapply($); return next(e); });
+  on("prompt.submit", async ($: any, e: any, next: any) => { routing = true; await reapply($); return next(e); });
 
   // The band above the prompt: the account in force and one button per account the relay has a
   // token for, plus a usage button. Hidden by its own button (remembered across sessions); `/account show` brings it back.

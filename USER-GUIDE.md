@@ -52,7 +52,7 @@ Account names are lowercase, short, and yours to choose (`work`, `personal`, `te
 ## Things to know
 
 - The app's own usage tray shows the app's account; `/account` in a routed session shows the account it's billing.
-- Inside a routed session, claude.ai connectors, cloud routines and Remote Control aren't available (the swapped login is model-only). Everything else works as normal.
+- A session starts on the app's own login and switches to the chosen account with its first message, so Remote Control can connect at startup. Remote Control refuses to connect while a session is routed, so if it drops later, open a new session (or reload the plugin) to reconnect it. claude.ai connectors and cloud routines stay on the app's login.
 - The relay only listens on your own machine (127.0.0.1); nothing is reachable from the network. It also needs its secret key (`relay.key`), so other programs on your machine cannot use it.
 - At a 5-hour limit the app holds new messages: choose **send anyway** on a held `/account <other>` (or click the other account in the band), then **Try again**.
 - Every token is one of your own subscriptions, approved by you through Anthropic's own sign-in. Don't share tokens with other people or machines.
