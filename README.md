@@ -1,5 +1,14 @@
 # claude-account-switcher
 
+> **This fork (asif17r/claude-account-switcher)** adds, on top of SmelterLabs' original:
+> - **Relay lock:** the relay makes a random secret (`relay.key`, mode 600) on first start and refuses any routed request or refresh without it, so other programs on the machine cannot spend your accounts.
+> - **`/account refresh`:** sends each account one 1-token request so every account's 5-hour and weekly usage is fresh.
+> - **Compact status line:** `💳 PERSONAL · 5h 42% wk 61% · work 5h 8% wk 20%` (billed account first, then the others).
+> - **`scripts/check-accounts.sh`:** prints the organization id and usage behind each stored token, to catch a token approved under the wrong account.
+> - **macOS tested** (Claude Desktop 5.11492.5, Claude Code 2.1.325, macOS 26, Apple silicon).
+>
+> New machine? Follow **[Setup on a new machine](#setup-on-a-new-machine-macos)** below.
+
 Bill a Claude Code session to a different Claude subscription, per project or on demand, inside **one** Claude Desktop app or one terminal. No logout, no restart, no second copy of the app.
 
 - A project folder with `.claude/account` containing `work` bills every session opened there to the account named `work`.
@@ -11,15 +20,56 @@ Bill a Claude Code session to a different Claude subscription, per project or on
 |---|---|---|---|
 | Windows | `scripts\install.ps1` | per-user scheduled task `ClaudeAccountRelay` | in daily use with Claude Desktop |
 | Linux | `scripts/install.sh` | `systemd --user` unit `claude-account-relay.service` | tested end to end (Pop!_OS 24.04, Claude Code 2.1.281) |
-| macOS | `scripts/install.sh` | LaunchAgent `com.claude-account-switcher.relay` | **untested**: written to the launchd docs and shellcheck-clean, but no Mac was available |
+| macOS | `scripts/install.sh` | LaunchAgent `com.claude-account-switcher.relay` | in daily use on this fork (Claude Desktop, Apple silicon) |
 
 On Linux there is no Claude Desktop app, so the switcher there applies to terminal Claude Code only. On Windows and macOS it covers both the Desktop app's Code sessions and the terminal.
+
+## Setup on a new machine (macOS)
+
+Needs: Claude Desktop (or Claude Code 2.1.280+), Python 3.8+ (`/opt/homebrew/bin/python3` is preferred), git, and every account's own paid Claude subscription.
+
+1. **Clone the fork:**
+   ```bash
+   git clone https://github.com/asif17r/claude-account-switcher.git ~/Documents/GitHub/claude-account-switcher
+   cd ~/Documents/GitHub/claude-account-switcher
+   ```
+2. **Install** (copies plugin and relay to `~/.claude/account-switcher`, adds `CLAUDE_CODE_PLUGIN_DIRS` and `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` to `~/.claude/settings.json` with a backup, registers and starts the LaunchAgent; the relay creates `relay.key` itself):
+   ```bash
+   bash scripts/install.sh
+   ```
+   It ends with `Relay running: pid …, port 48620`. Run the scripts with `bash`: on some clones the execute bit is missing.
+3. **Add each account, one at a time.** The approval page uses whatever account the *browser* is signed into and offers no picker, so:
+   ```bash
+   bash scripts/add-account.sh personal
+   ```
+   - If a browser opens on its own and is signed into the right account, approve there.
+   - Otherwise close that tab, press `c` in the terminal to copy the link, open it in the browser (or a private window) signed into that account, approve, and paste the code back into the terminal.
+   - Repeat with `bash scripts/add-account.sh work` for the other account.
+4. **Check the tokens are really different accounts:**
+   ```bash
+   bash scripts/check-accounts.sh
+   ```
+   Each name must show a different `org`. Same org twice means one token was approved under the wrong account: rerun `add-account.sh <name>` for it (it replaces the old token).
+5. **Load the plugin:** open a new session in the app (send any first message, then `/account`), or type `/reload-plugins` in an open one. The band above the prompt shows `💳 window account` with one button per account.
+6. Optional: `/account refresh` fills in both accounts' usage.
+
+The token from a wrong-account approval stays valid for a year; revoke it in that account's claude.ai settings if it lists it.
+
+### When the 5-hour limit blocks the app
+
+The app holds new messages while the signed-in account is at its limit, including `/account work`. Choose **send anyway** on the held `/account work` (or click **work** in the band), then **Try again**: the retry bills the other account.
+
+### Which login decides what
+
+- **Model calls:** the account you pick (`/account`, band button, or `.claude/account`), else the app's login.
+- **Connectors, Remote Control, cloud routines, scheduled tasks, the app's usage panel:** the app's own login, never the relay's tokens (they are inference-only).
+- **Organization policy** (for example Remote Control disabled by a Team admin): the Claude Code login stored in `~/.claude.json`, written by `claude` → `/login` in a terminal. If a work Team account is logged in there, its policy applies to every session. Log it into the account whose policy you want.
 
 ## How it works
 
 Claude Desktop hands every Code session a login ticket for the account the app is signed into, and the engine keeps that ticket in memory, so environment tricks do not change it. What the engine *does* read per request is where to send the request (`ANTHROPIC_BASE_URL`). This project uses that:
 
-1. **Relay** (`relay/relay.py`): a loopback-only HTTP relay on `127.0.0.1:48620`. A request to `/acct/<name>/v1/...` is forwarded to `api.anthropic.com/v1/...` with the Authorization header replaced by `<name>`'s long-lived token. Responses stream back unchanged. It never logs a token.
+1. **Relay** (`relay/relay.py`): a loopback-only HTTP relay on `127.0.0.1:48620`. A request to `/acct/<name>/<key>/v1/...` (the key from `relay.key`; anything else gets 403) is forwarded to `api.anthropic.com/v1/...` with the Authorization header replaced by `<name>`'s long-lived token. Responses stream back unchanged. It never logs a token.
 2. **Plugin** (`plugin/`): a Claude Code hooks module that, when a marker or `/account` names an account, points the session at the relay path for that account and keeps the status line honest. It never reads a token; it learns which accounts exist, when their tokens expire and what their usage meters say from the relay's heartbeat file.
 3. **Tokens** (`~/.claude/account-switcher/tokens.json`): one long-lived token per account from `claude setup-token` (one browser approval, valid one year, model requests only). Same protection level as Claude Code's own `.credentials.json`.
 
@@ -59,7 +109,7 @@ Open a new Claude Code session afterwards; existing sessions do not load the plu
 ## Use
 
 - Put `.claude/account` with the account name in any project that should bill another account.
-- In a session: click an account in the band above the prompt, or `/account`, `/account work`, `/account off`, `/account hide`, `/account show`.
+- In a session: click an account in the band above the prompt, or `/account`, `/account work`, `/account off`, `/account refresh`, `/account hide`, `/account show`.
 - Renew a token near expiry (the status line warns at 14 days): run add-account for that name again.
 - Remove: `scripts\uninstall.ps1` / `scripts/uninstall.sh` (`-PurgeTokens` / `--purge-tokens` to delete the token store too).
 
@@ -67,7 +117,8 @@ Open a new Claude Code session afterwards; existing sessions do not load the plu
 
 - A routed session's rate-limit meters (`/account`) are the routed account's. The app's own usage tray still shows the app's login.
 - Hooks-module plugins are early access in the terminal CLI: the terminal needs `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`, which `install.sh` sets in `settings.json`. Claude Desktop sets it for its own sessions, so `install.ps1` does not.
-- macOS is untested. If you run it there, an issue with the output of `launchctl print gui/$(id -u)/com.claude-account-switcher.relay` is welcome.
+- Switching a chat to another account makes its next message miss the prompt cache (cache is per account), so that one message re-reads the whole chat. `/compact` first if the chat is long.
+- A chat billed to a company Team account becomes that organization's data, and shows in its admin usage under your name.
 
 ## Terms
 
