@@ -6,7 +6,7 @@ import { test, expect, mock } from "claude-code/testing";
 
 const RELAY = "http://127.0.0.1:48620";
 const KEY = "test-key";
-const BAND = { plugin: "account-switcher", component: "AbovePrompt" as const, props: { hasSurvey: false, isWorking: false, maxRows: 10 } };
+const BAND = { plugin: "AS", component: "AbovePrompt" as const, props: { hasSurvey: false, isWorking: false, maxRows: 10 } };
 
 // The world beneath the plugin: a clock, an in-memory file system holding the relay's heartbeat
 // and key (matched by file name, whatever the plugin's root), and an environment the plugin may
@@ -26,11 +26,12 @@ function world(on: any, up: boolean, env: Record<string, string | undefined>, fi
   on("env.get", async (_$: any, e: any) => ({ value: env[e.name] }));
   on("env.set", async (_$: any, e: any) => { env[e.name] = e.value; return { value: undefined }; });
   on("ui.status", async () => ({ value: undefined }));
-  on("ui.toast", async () => ({ value: undefined }));
+  const toasts: string[] = [];
+  on("ui.toast", async (_$: any, e: any) => { toasts.push(e.text); return { value: undefined }; });
   on("command.register", async (_$: any, e: any) => ({ value: { command: e.name } }));
   // The engine's own band is empty: what a hidden band's next(e) reaches.
   on("ui.render", { component: "AbovePrompt" }, async () => ({ type: "Box", props: {}, children: [] }));
-  return { env, fs, clock };
+  return { env, fs, clock, toasts };
 }
 
 for (const surface of ["terminal", "desktop"] as const) {
@@ -111,5 +112,22 @@ test("a hide remembered in the store keeps the band away; /account show brings i
   const { text } = await $.command.run({ command: "account", args: "show" });
   expect(text).toMatch(/shown/);
   expect(await ui.find({ key: "acct:vbp" })).toBeDefined();
+  await ui.unmount();
+});
+
+test("the usage button refreshes every account and shows their usage in a toast", async ($, on) => {
+  mock.store(on);
+  const { toasts } = world(on, true, {});
+  on("http.fetch", async (_$: any, e: any) => {
+    expect(e.url).toBe(`${RELAY}/refresh/${KEY}`);
+    const w = { at: Date.now() / 1000, h5: 0.27, h5_reset: null, d7: 0.05, d7_reset: null };
+    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ results: { personal: "ok", vbp: "ok" }, usage: { personal: w, vbp: { ...w, h5: 0.46, d7: 0.9 } } }) } };
+  });
+  await $.session.start({ cwd: "C:/work/project", surface: "desktop", isInteractive: true });
+  const ui = await $.ui.mount({ ...BAND, surface: "desktop" });
+  await ui.press({ key: "usage" });
+  const last = toasts[toasts.length - 1];
+  expect(last).toMatch(/personal usage: 5-hour 27%.*weekly 5%/);
+  expect(last).toMatch(/vbp usage: 5-hour 46%.*weekly 90%/);
   await ui.unmount();
 });

@@ -15,6 +15,6 @@ export type Billing = {
 
 declare module "claude-code" {
   interface PluginState {
-    "account-switcher": { billing: Billing; isHidden: boolean };
+    "AS": { billing: Billing; isHidden: boolean };
   }
 }

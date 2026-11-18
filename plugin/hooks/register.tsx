@@ -25,10 +25,10 @@ type Usage = { at: number; h5: number | null; h5_reset: number | null; d7: numbe
 type Heartbeat = { port: number; pid: number; at: number; accounts: string[]; expires?: Record<string, string>; usage?: Record<string, Usage> };
 
 // What the band draws from. Held by the host, so a hot reload keeps the chosen account.
-const billing = atom({ plugin: "account-switcher", key: "billing" } as const, {
+const billing = atom({ plugin: "AS", key: "billing" } as const, {
   account: null, source: null, accounts: [], relayUp: false, host: null,
 } as Billing);
-const isHidden = atom({ plugin: "account-switcher", key: "isHidden" } as const, false);
+const isHidden = atom({ plugin: "AS", key: "isHidden" } as const, false);
 
 // The routed account's own usage, as the API reported it on that account's last reply through the relay.
 // The desktop app's usage readout is the window's login, not this.
@@ -156,6 +156,24 @@ async function setHidden($: any, hidden: boolean): Promise<void> {
   await $.store.set(HIDDEN_KEY, hidden);
 }
 
+// Fresh usage for every account: the relay sends each one a 1-token request and returns their
+// usage windows. One line per account, or the reason it could not.
+async function refreshUsage($: any): Promise<{ ok: boolean; lines: string[] }> {
+  hb = await readHeartbeat($);
+  relayKey = await readKey($);
+  if (!hb || !relayKey) return { ok: false, lines: ["Relay is down or has no key; cannot refresh usage."] };
+  try {
+    const r = await $.http.fetch(`${RELAY}/refresh/${relayKey}`, { method: "POST" });
+    if (!r.ok) return { ok: false, lines: [`Refresh failed: HTTP ${r.status}`] };
+    const out = JSON.parse(r.text) as { results: Record<string, string>; usage: Record<string, Usage> };
+    const lines = Object.keys(out.results).map((n) => usageLine(n, out.usage?.[n]) ?? `  ${n}: ${out.results[n]}`);
+    await reapply($);
+    return { ok: true, lines };
+  } catch (err) {
+    return { ok: false, lines: [`Refresh failed: ${String(err)}`] };
+  }
+}
+
 export function register(on: any) {
   on("session.start", async ($: any, e: any, next: any) => {
     store = dir($.plugin.root);
@@ -183,7 +201,7 @@ export function register(on: any) {
   on("prompt.submit", async ($: any, e: any, next: any) => { await reapply($); return next(e); });
 
   // The band above the prompt: the account in force and one button per account the relay has a
-  // token for. Hidden by its own button (remembered across sessions); `/account show` brings it back.
+  // token for, plus a usage button. Hidden by its own button (remembered across sessions); `/account show` brings it back.
   on("ui.render", { component: "AbovePrompt" }, async ($: any, e: any, next: any) => {
     if (e.props.hasSurvey || (await read($, isHidden))) return next(e);
     const b = await read($, billing);
@@ -192,6 +210,11 @@ export function register(on: any) {
     const pick = (name: string | null) => async () => {
       const s = await choose($, name);
       $.ui.toast(`account-switcher: ${s}. Every session uses it from its next message.`);
+    };
+    // Fresh 5-hour and weekly usage for every account, shown in a toast.
+    const showUsage = async () => {
+      const u = await refreshUsage($);
+      $.ui.toast(u.lines.map((l) => l.trim()).join("\n"), { timeoutMs: 15000 });
     };
     return (
       <Box flexDirection="row" gap={1}>
@@ -202,6 +225,7 @@ export function register(on: any) {
             ))
           : <Text dimColor>relay down</Text>}
         {b.account && <Button key="acct:off" label="off" dimColor onPress={pick(null)} />}
+        {b.relayUp && <Button key="usage" label="usage" dimColor onPress={showUsage} />}
         <Button key="hide" label="hide" dimColor onPress={() => setHidden($, true)} />
       </Box>
     );
@@ -225,21 +249,8 @@ export function register(on: any) {
       return { text: lines.join("\n") };
     }
     if (arg === "refresh") {
-      relayKey = await readKey($);
-      if (!hb || !relayKey) return { text: "Relay is down or has no key; cannot refresh usage." };
-      try {
-        const r = await $.http.fetch(`${RELAY}/refresh/${relayKey}`, { method: "POST" });
-        if (!r.ok) return { text: `Refresh failed: HTTP ${r.status}` };
-        const out = JSON.parse(r.text) as { results: Record<string, string>; usage: Record<string, Usage> };
-        const lines = ["Usage refreshed (each account sent one tiny request):"];
-        for (const n of Object.keys(out.results)) {
-          lines.push(usageLine(n, out.usage?.[n]) ?? `  ${n}: ${out.results[n]}`);
-        }
-        await reapply($);
-        return { text: lines.join("\n") };
-      } catch (err) {
-        return { text: `Refresh failed: ${String(err)}` };
-      }
+      const u = await refreshUsage($);
+      return { text: (u.ok ? ["Usage refreshed (each account sent one tiny request):", ...u.lines] : u.lines).join("\n") };
     }
     if (arg === "show" || arg === "hide") {
       await setHidden($, arg === "hide");
