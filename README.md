@@ -4,7 +4,7 @@
 > - **Relay lock:** the relay makes a random secret (`relay.key`, mode 600) on first start and refuses any routed request or refresh without it, so other programs on the machine cannot spend your accounts.
 > - **`/account refresh`:** sends each account one 1-token request so every account's 5-hour and weekly usage is fresh.
 > - **`usage` button in the band:** fresh 5-hour and weekly usage for every account in a pop-up. The plugin is named `AS`, so the status line reads `AS 💳 WORK`.
-> - **Compact status line:** `💳 PERSONAL · 5h 42% wk 61% · work 5h 8% wk 20%` (billed account first, then the others).
+> - **Compact status line:** `💳 PERSONAL · 5h 42% wk 61%` (only the billed account; the band's usage button shows all).
 > - **One account for the whole machine:** a switch in any session (band button or `/account <name>`) is saved in `~/.claude/account-switcher/current` and every session, open or new, follows it: at its next message, and within about 5 seconds on its band and status line. Project marker files are no longer read.
 > - **`scripts/check-accounts.sh`:** prints the organization id and usage behind each stored token, to catch a token approved under the wrong account.
 > - **macOS tested** (Claude Desktop 5.11492.5, Claude Code 2.1.325, macOS 26, Apple silicon).

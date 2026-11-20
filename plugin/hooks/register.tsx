@@ -68,15 +68,13 @@ async function readKey($: any): Promise<string> {
   } catch { return ""; }
 }
 
-// Compact usage readout. The billed account's meters come first without its name (the label
-// already says it); every other account follows with its name, e.g. "5h 42% wk 61% · work 5h 8% wk 20%".
+// Usage readout for the billed account only, e.g. "5h 42% wk 61%". Empty when no account is
+// routed (the window account's usage is in the app's own usage panel) or none has been seen yet.
 function usageSummary(h: Heartbeat | null, current: string | null): string {
-  if (!h?.usage) return "";
+  const u = current ? h?.usage?.[current] : undefined;
+  if (!u) return "";
   const pct = (v: number | null) => (v === null ? "?" : `${Math.round(v * 100)}%`);
-  const meter = (n: string) => { const u = h.usage![n]; return `5h ${pct(u.h5)} wk ${pct(u.d7)}`; };
-  const seen = (h.accounts ?? []).filter((n) => h.usage?.[n]);
-  const own = current && seen.includes(current) ? [meter(current)] : [];
-  return [...own, ...seen.filter((n) => n !== current).map((n) => `${n} ${meter(n)}`)].join(" · ");
+  return `5h ${pct(u.h5)} wk ${pct(u.d7)}`;
 }
 
 // The machine-wide choice: the account name in `current` beside the relay, or null (missing or

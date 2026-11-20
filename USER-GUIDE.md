@@ -20,9 +20,9 @@ Works on Windows and macOS with the Claude Desktop app and with terminal Claude 
 
 | Status line | Meaning |
 |---|---|
-| `💳 WORK · 5h 8% wk 20% · personal 5h 42% wk 61%` | This session's model calls go to the `work` account; then its usage, then the other accounts'. |
+| `💳 WORK · 5h 8% wk 20%` | This session's model calls go to the `work` account, with that account's 5-hour and weekly usage. The band's usage button shows every account. |
 | `💳 WORK ⚠ token expires in 9d` | Same, and that token needs renewing soon (see below). |
-| `💳 window account · personal 5h 42% wk 61%` | Not routed: the app's own account; usage of accounts seen so far. |
+| `💳 window account` | Not routed: the app's own account (its usage is in the app's usage panel). |
 | `⚠ WORK: relay down · billing window account` | The relay isn't running, so the session fell back to the app's account. Start it (see below) or log off and on. |
 | `⚠ WORK: no token · billing window account` | No token stored for that name. Add one (see below). |
 | (nothing) | The session is on the app's account and no usage has been read yet. |
